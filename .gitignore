@@ -25,3 +25,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Project-specific files (API keys, assets not for repo)
+API キーの詳細.txt
+character_noukin.png
