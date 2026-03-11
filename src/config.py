@@ -29,9 +29,12 @@ class Settings(BaseSettings):
     # Groq API のキー
     groq_api_key: str
 
-    # Qdrant（ベクトルDB）の接続情報 — Phase 2 以降で使用
+    # Qdrant（ベクトルDB）の接続情報
     qdrant_url: str = ""
     qdrant_api_key: str = ""
+
+    # HuggingFace Inference API のトークン（埋め込みベクトル生成に使用）
+    hf_api_token: str = ""
 
 
 # シングルトン的に1つのインスタンスを使い回す。

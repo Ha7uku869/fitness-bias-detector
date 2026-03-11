@@ -118,7 +118,7 @@ async def callback(request: Request) -> dict[str, str]:
         history = get_history(user_id)
 
         try:
-            reply_text = await respond(user_text, history=history)
+            reply_text = await respond(user_text, user_id=user_id, history=history)
         except Exception:
             logger.exception("Failed to generate response")
             reply_text = "すみません、応答の生成に失敗しました。もう一度お試しください。"
