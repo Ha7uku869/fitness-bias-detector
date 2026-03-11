@@ -17,7 +17,7 @@ import logging
 
 from src.bias.prompts import SYSTEM_PROMPT
 from src.llm.client import chat
-from src.rag.retriever import retrieve_similar, store_message
+from src.rag.retriever import retrieve_knowledge, retrieve_similar, store_message
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +50,8 @@ async def respond(
     if user_id:
         similar_messages = await retrieve_similar(user_id, user_message)
         if similar_messages:
-            # 検索結果をコンテキスト文字列に整形
             context_lines = "\n".join(f"- {msg}" for msg in similar_messages)
-            rag_context = (
+            rag_context += (
                 "\n\n【参考: このユーザーの過去の関連する会話】\n"
                 f"{context_lines}\n"
             )
@@ -61,6 +60,21 @@ async def respond(
                 len(similar_messages),
                 user_id,
             )
+
+    # --- Step 1.5: 知識ベースから関連知識を検索 ---
+    knowledge_results = await retrieve_knowledge(user_message)
+    if knowledge_results:
+        knowledge_lines = "\n".join(
+            f"- [{k['category']}] {k['text']}（出典: {k['source']}）"
+            for k in knowledge_results
+        )
+        rag_context += (
+            "\n\n【参考: エビデンスベースの筋トレ知識】\n"
+            f"{knowledge_lines}\n"
+            "\n※ 上記の知識を参考にしつつ、ユーザーへの応答に自然に組み込んでください。"
+            "出典を明示すると信頼性が上がります。\n"
+        )
+        logger.info("RAG: %d 件の関連知識を取得しました", len(knowledge_results))
 
     # --- Step 2: RAG コンテキストを付加してメッセージを構築 ---
     augmented_message = user_message

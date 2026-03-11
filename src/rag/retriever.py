@@ -20,7 +20,7 @@ RAG を使うと外部データベースの情報を活用できる。
 import logging
 
 from src.rag.embedder import embed
-from src.rag.store import search, upsert
+from src.rag.store import search, search_knowledge, upsert
 
 logger = logging.getLogger(__name__)
 
@@ -73,4 +73,30 @@ async def retrieve_similar(
         return [r["text"] for r in results]
     except Exception:
         logger.exception("RAG からの類似会話検索に失敗（user_id=%s）", user_id)
+        return []
+
+
+async def retrieve_knowledge(query: str, limit: int = 2) -> list[dict]:
+    """クエリに関連する知識をベクトル検索で取得する。
+
+    Args:
+        query: 検索クエリ（通常はユーザーの最新メッセージ）
+        limit: 返す結果の最大数
+
+    Returns:
+        類似度が高い知識エントリのリスト。
+        各要素は {"text": str, "category": str, "source": str, "score": float}。
+        検索に失敗した場合は空リストを返す。
+
+    --- 技術解説: 知識検索 vs 会話検索 ---
+    会話検索は user_id でフィルターして個人の過去の会話を取得するが、
+    知識検索はフィルターなしで全ユーザー共通の知識ベースを検索する。
+    limit=2 にしているのは、プロンプトが長くなりすぎないようにするため。
+    """
+    try:
+        vector = await embed(query)
+        results = search_knowledge(vector, limit=limit)
+        return results
+    except Exception:
+        logger.exception("知識ベースの検索に失敗")
         return []
