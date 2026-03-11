@@ -34,28 +34,36 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-async def chat(user_message: str, system_prompt: str) -> str:
+async def chat(
+    user_message: str,
+    system_prompt: str,
+    history: list[dict[str, str]] | None = None,
+) -> str:
     """ユーザーのメッセージに対して LLM の応答を返す。
 
     Args:
         user_message: ユーザーが送ったテキスト
         system_prompt: LLM の振る舞いを制御するシステムプロンプト
+        history: 過去の会話履歴。[{"role": "user", "content": "..."}, ...] の形式
 
     Returns:
         LLM が生成した応答テキスト
 
-    --- 技術解説 ---
-    llama-3.3-70b-versatile は Meta の Llama 3.3 70B モデル。
-    オープンソースモデルの中ではトップクラスの性能で、
-    日本語の対話にも十分対応できる。Groq では無料で利用可能。
+    --- 技術解説: 会話履歴の渡し方 ---
+    Chat Completions API の messages は「会話全体」をリストで渡す。
+    [system, 過去user, 過去assistant, 過去user, 過去assistant, ..., 今回のuser]
+    LLM はこのリスト全体を見て応答を生成するので、
+    過去の会話を含めると文脈を踏まえた応答ができる。
     """
     client = _get_client()
 
+    messages = [{"role": "system", "content": system_prompt}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+
     response = await client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
+        messages=messages,
     )
     return response.choices[0].message.content

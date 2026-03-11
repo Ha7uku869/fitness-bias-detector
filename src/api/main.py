@@ -31,6 +31,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 from src.bias.detector import respond
 from src.config import get_settings
+from src.storage.memory import add_message, get_history
 
 logger = logging.getLogger(__name__)
 
@@ -109,15 +110,22 @@ async def callback(request: Request) -> dict[str, str]:
         if not isinstance(event.message, TextMessageContent):
             continue
 
+        user_id = event.source.user_id
         user_text = event.message.text
-        logger.info("Received message: %s", user_text)
+        logger.info("Received message from %s: %s", user_id, user_text)
 
-        # 認知バイアス検知を含む応答を生成
+        # 会話履歴を取得して応答を生成
+        history = get_history(user_id)
+
         try:
-            reply_text = await respond(user_text)
+            reply_text = await respond(user_text, history=history)
         except Exception:
             logger.exception("Failed to generate response")
             reply_text = "すみません、応答の生成に失敗しました。もう一度お試しください。"
+
+        # 会話履歴に今回のやりとりを保存
+        add_message(user_id, "user", user_text)
+        add_message(user_id, "assistant", reply_text)
 
         # LINE に返信
         messaging_api.reply_message(
