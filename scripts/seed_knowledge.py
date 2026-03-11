@@ -44,8 +44,10 @@ async def seed() -> None:
         text = entry["text"]
         category = entry["category"]
         source = entry["source"]
+        # embed_text（英語サマリー）があればそれでベクトル化、なければ text を使う
+        embed_source = entry.get("embed_text", text)
 
-        vector = await embed(text)
+        vector = await embed(embed_source)
         upsert_knowledge(text, category, source, vector)
         logger.info("  [%d/%d] %s", i, total, category)
 

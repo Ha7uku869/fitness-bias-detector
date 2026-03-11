@@ -24,6 +24,57 @@ from src.rag.store import search, search_knowledge, upsert
 
 logger = logging.getLogger(__name__)
 
+# --- 日本語 → 英語キーワードマッピング ---
+# 英語埋め込みモデルでの検索精度を向上させるため、
+# よく使われる日本語キーワードを英語に変換して検索クエリに追加する。
+_JA_TO_EN_KEYWORDS: dict[str, str] = {
+    "ベンチプレス": "bench press",
+    "スクワット": "squat",
+    "デッドリフト": "deadlift",
+    "タンパク質": "protein intake how much",
+    "プロテイン": "protein intake how much",
+    "たんぱく質": "protein intake how much",
+    "カロリー": "calories bulking cutting",
+    "増量": "bulking calories surplus",
+    "減量": "cutting calories deficit fat loss",
+    "筋肉痛": "muscle soreness DOMS",
+    "フォーム": "form technique",
+    "怪我": "injury prevention",
+    "停滞": "plateau stuck not improving",
+    "伸びない": "plateau stuck not improving strength",
+    "伸び悩": "plateau stuck not improving",
+    "サボ": "skip gym rest day motivation",
+    "休み": "rest day recovery",
+    "やる気": "motivation consistency habit",
+    "モチベ": "motivation consistency habit",
+    "睡眠": "sleep recovery growth hormone",
+    "寝不足": "sleep deprivation tired",
+    "セット": "sets volume training",
+    "頻度": "frequency how often train",
+    "比較": "comparing others genetics social media",
+    "才能": "genetics talent natural ability",
+    "食事": "nutrition diet protein calories",
+    "栄養": "nutrition diet protein calories",
+}
+
+
+def _augment_query_with_english(query: str) -> str:
+    """日本語クエリに英語キーワードを追加して検索精度を向上させる。
+
+    --- 技術解説: クエリ拡張（Query Expansion） ---
+    英語特化の埋め込みモデルで日本語テキストを検索する場合、
+    日本語 → 英語の変換をクエリ側で行うことで検索精度が向上する。
+    完全な翻訳は不要で、キーワードレベルの対応で十分な効果がある。
+    """
+    en_parts = []
+    for ja_keyword, en_keyword in _JA_TO_EN_KEYWORDS.items():
+        if ja_keyword in query:
+            en_parts.append(en_keyword)
+
+    if en_parts:
+        return query + " " + " ".join(en_parts)
+    return query
+
 
 async def store_message(user_id: str, text: str, role: str) -> None:
     """会話メッセージを埋め込みベクトル化して Qdrant に保存する。
@@ -94,7 +145,8 @@ async def retrieve_knowledge(query: str, limit: int = 2) -> list[dict]:
     limit=2 にしているのは、プロンプトが長くなりすぎないようにするため。
     """
     try:
-        vector = await embed(query)
+        augmented_query = _augment_query_with_english(query)
+        vector = await embed(augmented_query)
         results = search_knowledge(vector, limit=limit)
         return results
     except Exception:
