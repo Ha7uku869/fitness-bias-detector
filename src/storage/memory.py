@@ -1,51 +1,70 @@
-"""ユーザーごとの会話履歴をメモリ上に保持するモジュール。
+"""ユーザーごとの会話履歴を SQLite に永続化するモジュール。
 
---- 技術解説: インメモリ vs DB ---
-現段階ではサーバーのメモリ（辞書）に会話を保持する。
-メリット: 実装がシンプル、DBが不要
-デメリット: サーバー再起動で消える
+--- 技術解説: SQLite ---
+SQLite はファイルベースの軽量データベース。
+サーバーが再起動しても会話履歴が消えない。
+Python 標準ライブラリに含まれているため追加インストール不要。
 
-Phase 2 で SQLite や Qdrant に永続化すれば、
-サーバー再起動後も会話を復元できるようになる。
-今はまず「会話の流れを覚える」機能を最小限で実装する。
-
---- 技術解説: collections.deque ---
-deque（デック）は「両端キュー」。maxlen を指定すると、
-上限を超えた古い要素が自動的に削除される。
-リストだと手動で古い要素を消す必要があるが、deque なら不要。
+Render の無料プランではサーバーが頻繁に再起動するが、
+SQLite ファイルが残っていれば会話を復元できる。
 """
 
-from collections import deque
+import json
+import sqlite3
+from pathlib import Path
 
-# ユーザーIDをキー、会話履歴（deque）を値とする辞書。
-# 各ユーザーの直近 MAX_HISTORY ターン分の会話を保持する。
-MAX_HISTORY = 10  # 直近10ターン（user + assistant で5往復分）
+MAX_HISTORY = 10  # 直近10メッセージ（5往復分）をLLMに渡す
 
-_histories: dict[str, deque[dict[str, str]]] = {}
+# DB ファイルのパス（プロジェクトルートの data/ 以下に保存）
+_DB_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+_DB_PATH = _DB_DIR / "conversations.db"
+
+_conn: sqlite3.Connection | None = None
+
+
+def _get_conn() -> sqlite3.Connection:
+    """SQLite コネクションを取得する（初回のみ DB を初期化）。"""
+    global _conn
+    if _conn is None:
+        _DB_DIR.mkdir(exist_ok=True)
+        _conn = sqlite3.connect(str(_DB_PATH))
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        _conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_id ON messages (user_id)"
+        )
+        _conn.commit()
+    return _conn
 
 
 def get_history(user_id: str) -> list[dict[str, str]]:
-    """指定ユーザーの会話履歴をリストで返す。
-
-    Args:
-        user_id: LINE のユーザーID（一意な文字列）
-
-    Returns:
-        [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
-    """
-    if user_id not in _histories:
-        return []
-    return list(_histories[user_id])
+    """指定ユーザーの直近の会話履歴をリストで返す。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT role, content FROM messages
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (user_id, MAX_HISTORY),
+    ).fetchall()
+    # DESC で取得したので逆順にして時系列順にする
+    return [{"role": role, "content": content} for role, content in reversed(rows)]
 
 
 def add_message(user_id: str, role: str, content: str) -> None:
-    """会話履歴にメッセージを1件追加する。
-
-    Args:
-        user_id: LINE のユーザーID
-        role: "user" または "assistant"
-        content: メッセージのテキスト
-    """
-    if user_id not in _histories:
-        _histories[user_id] = deque(maxlen=MAX_HISTORY)
-    _histories[user_id].append({"role": role, "content": content})
+    """会話履歴にメッセージを1件追加する。"""
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
+        (user_id, role, content),
+    )
+    conn.commit()
