@@ -40,6 +40,45 @@ def _get_conn() -> sqlite3.Connection:
         _conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_user_id ON messages (user_id)"
         )
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id TEXT NOT NULL,
+                field TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, field)
+            )
+        """)
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS training_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                exercise TEXT NOT NULL,
+                weight TEXT NOT NULL,
+                reps INTEGER,
+                sets INTEGER,
+                note TEXT DEFAULT '',
+                logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        _conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_training_user ON training_logs (user_id)"
+        )
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS nutrition_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                item TEXT NOT NULL,
+                type TEXT DEFAULT '',
+                protein_g REAL,
+                amount TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        _conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_nutrition_user ON nutrition_logs (user_id)"
+        )
         _conn.commit()
     return _conn
 
@@ -68,3 +107,122 @@ def add_message(user_id: str, role: str, content: str) -> None:
         (user_id, role, content),
     )
     conn.commit()
+
+
+def get_profile(user_id: str) -> dict[str, str]:
+    """ユーザープロフィールを辞書形式で返す。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT field, value FROM user_profiles WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    return {field: value for field, value in rows}
+
+
+def update_profile(user_id: str, updates: dict[str, str]) -> None:
+    """プロフィールを更新する（既存フィールドは上書き）。"""
+    conn = _get_conn()
+    for field, value in updates.items():
+        conn.execute(
+            """
+            INSERT INTO user_profiles (user_id, field, value)
+            VALUES (?, ?, ?)
+            ON CONFLICT (user_id, field) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (user_id, field, value),
+        )
+    conn.commit()
+
+
+def add_training_log(user_id: str, log: dict) -> None:
+    """トレーニング記録を1件追加する。"""
+    conn = _get_conn()
+    conn.execute(
+        """
+        INSERT INTO training_logs (user_id, exercise, weight, reps, sets, note)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            log.get("exercise", ""),
+            log.get("weight", ""),
+            log.get("reps"),
+            log.get("sets"),
+            log.get("note", ""),
+        ),
+    )
+    conn.commit()
+
+
+def get_recent_training_logs(user_id: str, limit: int = 20) -> list[dict]:
+    """直近のトレーニング記録を返す。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT exercise, weight, reps, sets, note, logged_at
+        FROM training_logs
+        WHERE user_id = ?
+        ORDER BY logged_at DESC
+        LIMIT ?
+        """,
+        (user_id, limit),
+    ).fetchall()
+    return [
+        {
+            "exercise": r[0],
+            "weight": r[1],
+            "reps": r[2],
+            "sets": r[3],
+            "note": r[4],
+            "date": r[5],
+        }
+        for r in reversed(rows)
+    ]
+
+
+def add_nutrition_log(user_id: str, log: dict) -> None:
+    """栄養・プロテイン記録を1件追加する。"""
+    conn = _get_conn()
+    conn.execute(
+        """
+        INSERT INTO nutrition_logs (user_id, item, type, protein_g, amount, note)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            log.get("item", ""),
+            log.get("type", ""),
+            log.get("protein_g"),
+            log.get("amount", ""),
+            log.get("note", ""),
+        ),
+    )
+    conn.commit()
+
+
+def get_recent_nutrition_logs(user_id: str, limit: int = 20) -> list[dict]:
+    """直近の栄養・プロテイン記録を返す。"""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT item, type, protein_g, amount, note, logged_at
+        FROM nutrition_logs
+        WHERE user_id = ?
+        ORDER BY logged_at DESC
+        LIMIT ?
+        """,
+        (user_id, limit),
+    ).fetchall()
+    return [
+        {
+            "item": r[0],
+            "type": r[1],
+            "protein_g": r[2],
+            "amount": r[3],
+            "note": r[4],
+            "date": r[5],
+        }
+        for r in reversed(rows)
+    ]

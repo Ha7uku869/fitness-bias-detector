@@ -18,6 +18,16 @@ import logging
 from src.bias.prompts import SYSTEM_PROMPT
 from src.llm.client import chat
 from src.rag.retriever import retrieve_knowledge, retrieve_similar, store_message
+from src.storage.memory import (
+    add_nutrition_log,
+    add_training_log,
+    get_profile,
+    get_recent_nutrition_logs,
+    get_recent_training_logs,
+    update_profile,
+)
+from src.storage.profile_extractor import extract_profile
+from src.storage.training_analyzer import analyze_training_balance
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +55,158 @@ async def respond(
     LLM はこの追加コンテキストを参考にして応答を生成する。
     RAG が失敗しても（空リストが返っても）基本的な応答は生成できる。
     """
-    # --- Step 1: 過去の類似会話を検索 ---
+    # --- Step 0: ユーザープロフィールを取得 ---
     rag_context = ""
+    if user_id:
+        profile = get_profile(user_id)
+        if profile:
+            profile_lines = "\n".join(f"- {k}: {v}" for k, v in profile.items())
+            rag_context += (
+                "\n\n【このユーザーのプロフィール】\n"
+                f"{profile_lines}\n"
+                "\n※ ユーザーの体重・重量・目標などを把握した上で応答してください。\n"
+            )
+
+        # 未設定の重要情報を自然に聞くよう指示
+        missing_info = []
+        if not profile.get("goal"):
+            missing_info.append("数値目標（例: ベンチプレス○○kg、体脂肪率○○%）")
+        if not profile.get("ideal_physique"):
+            missing_info.append(
+                "理想の体型・見た目（例: 肩幅を広くしたい、腹筋を割りたい、"
+                "細マッチョ、舐められない体など、抽象的でもOK）"
+            )
+        if not profile.get("body_weight"):
+            missing_info.append("体重（プロテイン量や栄養の計算に必要）")
+        if not profile.get("height"):
+            missing_info.append("身長")
+        if missing_info:
+            items = "\n".join(f"- {g}" for g in missing_info)
+            rag_context += (
+                "\n\n【未設定: ユーザーの基本情報】\n"
+                "以下がまだわかりません。応答の最後にさりげなく聞いてみてください:\n"
+                f"{items}\n"
+                "※ ユーザーの質問への回答を優先し、最後に軽く添える程度にしてください。\n"
+                "※ 一度に全部聞かず、1〜2個ずつ自然に聞いてください。\n"
+                "※ 会話の流れで不自然な場合は聞かなくて構いません。\n"
+            )
+
+        # プロテイン・栄養の相談時、体重がわかっていれば計算コンテキストを注入
+        nutrition_keywords = ["プロテイン", "タンパク質", "たんぱく質", "栄養", "食事", "粉", "スクープ", "何グラム"]
+        is_nutrition_question = any(kw in user_message for kw in nutrition_keywords)
+        if is_nutrition_question and profile.get("body_weight"):
+            rag_context += (
+                "\n\n【栄養計算の参考情報】\n"
+                f"ユーザーの体重: {profile['body_weight']}\n"
+            )
+            if profile.get("height"):
+                rag_context += f"身長: {profile['height']}\n"
+            if profile.get("body_fat"):
+                rag_context += f"体脂肪率: {profile['body_fat']}\n"
+            rag_context += (
+                "\n推奨タンパク質量の計算:\n"
+                "- 筋肥大目的: 体重1kgあたり1.6〜2.2g\n"
+                "- 例: 70kgの場合 → 1日112〜154g\n"
+                "- 一般的なホエイプロテイン: 1スクープ(約30g粉)でタンパク質約24g\n"
+                "- 必要スクープ数の目安も提案してください\n"
+                "※ ユーザーの体重から具体的な数値を計算して提案してください。\n"
+            )
+
+        # 直近のトレーニング記録を取得
+        recent_logs = get_recent_training_logs(user_id)
+        if recent_logs:
+            log_lines = "\n".join(
+                f"- {lg['date']}: {lg['exercise']} {lg['weight']}×{lg['reps']}回×{lg['sets']}セット"
+                + (f"（{lg['note']}）" if lg.get("note") else "")
+                for lg in recent_logs
+            )
+            rag_context += (
+                "\n\n【このユーザーの直近のトレーニング記録】\n"
+                f"{log_lines}\n"
+                "\n※ 過去の記録を踏まえて、進捗や重量の変化に言及してください。\n"
+            )
+
+        # 直近の栄養・プロテイン記録を取得
+        recent_nutrition = get_recent_nutrition_logs(user_id)
+        if recent_nutrition:
+            nutr_lines = "\n".join(
+                f"- {n['date']}: {n['item']}"
+                + (f"（{n['type']}）" if n.get("type") else "")
+                + (f" {n['amount']}" if n.get("amount") else "")
+                + (f" タンパク質{n['protein_g']}g" if n.get("protein_g") else "")
+                + (f" {n['note']}" if n.get("note") else "")
+                for n in recent_nutrition
+            )
+            rag_context += (
+                "\n\n【このユーザーの直近のプロテイン・栄養記録】\n"
+                f"{nutr_lines}\n"
+                "\n※ 普段の摂取内容を踏まえてアドバイスしてください。\n"
+            )
+
+        # トレーニングメニューの相談かどうか判定し、部位バランス分析を注入
+        menu_keywords = ["何やる", "何する", "メニュー", "何やろう", "何しよう", "おすすめ", "提案", "今日のトレ", "今日は何"]
+        is_menu_question = any(kw in user_message for kw in menu_keywords)
+
+        # メニュー相談時、器具情報が未登録なら聞く
+        if is_menu_question:
+            equipment_fields = [
+                "equipment_bench", "equipment_barbell", "equipment_dumbbells",
+                "equipment_weight_total", "equipment_rack", "equipment_other",
+                "training_location",
+            ]
+            has_equipment_info = any(profile.get(f) for f in equipment_fields)
+            if not has_equipment_info:
+                rag_context += (
+                    "\n\n【未設定: トレーニング器具・環境】\n"
+                    "このユーザーの器具情報がまだわかりません。\n"
+                    "種目を提案する前に、まず以下を聞いてください:\n"
+                    "- トレーニング場所（自宅 or ジム）\n"
+                    "- 自宅の場合: 持っている器具（ダンベルの重さ・個数、ベンチの有無、"
+                    "バーベル・ラックの有無、その他の器具）\n"
+                    "※ 器具がわかれば、それに合った種目を提案できます。\n"
+                    "※ ジムの場合は器具の質問は不要で、そのまま種目を提案してください。\n"
+                )
+
+        # メニュー相談時、理想の体型が登録されていれば提案に反映
+        if is_menu_question and profile.get("ideal_physique"):
+            rag_context += (
+                "\n\n【このユーザーの理想の体型】\n"
+                f"{profile['ideal_physique']}\n"
+                "\n※ この理想像に近づくための種目を優先的に提案してください。\n"
+                "例: 「肩幅を広く」→ サイドレイズ・ショルダープレスを優先\n"
+                "例: 「腹筋を割りたい」→ 腹筋種目 + 体脂肪を落とすアドバイス\n"
+                "例: 「上半身メインで足は細め」→ 脚の種目は控えめに\n"
+            )
+
+        if is_menu_question:
+            analysis = analyze_training_balance(user_id)
+            if analysis["trained"]:
+                trained_lines = "\n".join(
+                    f"- {group}: {count}回" for group, count in analysis["trained"].items()
+                )
+                rag_context += (
+                    "\n\n【直近14日間の部位別トレーニング回数】\n"
+                    f"{trained_lines}\n"
+                )
+            if analysis["undertrained"]:
+                rag_context += (
+                    "\n\n【不足している部位】\n"
+                    + "\n".join(f"- {s}" for s in analysis["suggestions"])
+                    + "\n\n※ ユーザーがメニューを聞いているので、不足部位を優先的に提案してください。\n"
+                )
+            if analysis["exercises_done"]:
+                ex_lines = "\n".join(
+                    f"- {ex}: {count}回" for ex, count in analysis["exercises_done"].items()
+                )
+                rag_context += (
+                    "\n\n【このユーザーがやったことのある種目】\n"
+                    f"{ex_lines}\n"
+                    "\n※ ユーザーが経験済みの種目を中心に提案し、新しい種目も1〜2個提案してください。\n"
+                )
+
+        logger.info("Profile: %d 件のフィールドを取得（user_id=%s）", len(profile), user_id)
+
+    # --- Step 1: 過去の類似会話を検索 ---
     if user_id:
         similar_messages = await retrieve_similar(user_id, user_message)
         if similar_messages:
@@ -92,5 +252,26 @@ async def respond(
     if user_id:
         await store_message(user_id, user_message, "user")
         await store_message(user_id, reply, "assistant")
+
+    # --- Step 5: 会話からプロフィール・トレーニング・栄養記録を抽出・保存 ---
+    if user_id:
+        profile_updates, training_logs, nutrition_logs = await extract_profile(
+            user_message, reply
+        )
+        if profile_updates:
+            update_profile(user_id, profile_updates)
+            logger.info("Profile updated: %s（user_id=%s）", profile_updates, user_id)
+        for log in training_logs:
+            add_training_log(user_id, log)
+        if training_logs:
+            logger.info(
+                "Training logs: %d 件追加（user_id=%s）", len(training_logs), user_id
+            )
+        for log in nutrition_logs:
+            add_nutrition_log(user_id, log)
+        if nutrition_logs:
+            logger.info(
+                "Nutrition logs: %d 件追加（user_id=%s）", len(nutrition_logs), user_id
+            )
 
     return reply
